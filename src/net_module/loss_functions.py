@@ -36,11 +36,11 @@ def convert_px2cell(pxs, x_grid, y_grid, device='cuda'): # pixel to grid cell in
     return cell_idx.int()
 
 def get_weight(grid, index, sigma=1, rho=0):
-    # grid is HxW
-    # index is a pair of numbers
+    # grid is BxHxW
+    # index is B x pair of numbers
     # return weight in [0,1]
-    grid = grid.cpu()
-    index = index.cpu()
+    bs = grid.shape[0]
+    index = index[:,:,None,None]
     if sigma <= 0: # one-hot
         weight = torch.zeros_like(grid)
         weight[index[1],index[0]] = 1
@@ -49,14 +49,15 @@ def get_weight(grid, index, sigma=1, rho=0):
     if not isinstance(sigma, (tuple, list)):
         sigma = (sigma, sigma)
     sigma_x, sigma_y = sigma[0], sigma[1]
-    x = torch.arange(0, grid.shape[0])
-    y = torch.arange(0, grid.shape[1])
+    x = torch.arange(0, grid.shape[1], device=grid.device)
+    y = torch.arange(0, grid.shape[2], device=grid.device)
     x, y = torch.meshgrid(x, y)
-    in_exp = -1/(2*(1-rho**2)) * ((x-index[1])**2/(sigma_x**2) 
-                                + (y-index[0])**2/(sigma_y**2) 
-                                - 2*rho*(x-index[0])/(sigma_x)*(y-index[1])/(sigma_y))
+    x, y = x.unsqueeze(0).repeat(bs,1,1), y.unsqueeze(0).repeat(bs,1,1)
+    in_exp = -1/(2*(1-rho**2)) * ((x-index[:,1])**2/(sigma_x**2) 
+                                + (y-index[:,0])**2/(sigma_y**2) 
+                                - 2*rho*(x-index[:,0])/(sigma_x)*(y-index[:,1])/(sigma_y))
     z = 1/(2*math.pi*sigma_x*sigma_y*math.sqrt(1-rho**2)) * torch.exp(in_exp)
-    weight = z/z.max()
+    weight = z/(z.amax(dim=(1,2))[:,None,None])
     weight[weight<0.1] = 0
     return weight
 
@@ -64,10 +65,7 @@ def loss_nll(data, label, device='cuda'):
     # data is the energy grid, label should be the index (i,j) meaning which grid to choose
     # data  - BxCxHxW
     # label - BxC
-    weight = torch.tensor([]).to(device) # in batch
-    for i in range(data.shape[0]):
-        w = get_weight(data[i,0,:,:], label[i,:])
-        weight = torch.cat((weight, w.unsqueeze(0).to(device)))  # Gaussian fashion [CxHxW]
+    weight = get_weight(data[:,0], label) # Gaussian fashion [BxHxW]
 
     numerator_in_log   = torch.logsumexp(-data+torch.log(weight.unsqueeze(1)), dim=(2,3))
     denominator_in_log = torch.logsumexp(-data, dim=(2,3))
